@@ -11,6 +11,7 @@ Features:
 - Automatic IMU detection via I2C address scan
 - Hardware mode (real sensor) and simulation mode (no hardware needed)
 - Supports multiple IMU models with appropriate drivers
+- Movement direction detection (not moving, forward, backward, leftward, rightward)
 - Realistic synthetic data generation for simulation
 - Live data output with timestamps and sample rates
 - Optional live plotting with matplotlib
@@ -577,7 +578,8 @@ class IMUTester:
     """Main IMU testing class."""
     
     def __init__(self, simulate: bool = False, sample_rate: float = 50.0, 
-                 plot: bool = False, duration: Optional[float] = None):
+                 plot: bool = False, duration: Optional[float] = None,
+                 show_raw: bool = False, movement_threshold: float = 0.5):
         """
         Initialize IMU tester.
         
@@ -586,16 +588,25 @@ class IMUTester:
             sample_rate: Sample rate in Hz
             plot: Enable live plotting
             duration: Run duration in seconds (None for infinite)
+            show_raw: Show raw acceleration values instead of movement direction
+            movement_threshold: Threshold for movement detection in m/s²
         """
         self.simulate = simulate
         self.sample_rate = sample_rate
         self.plot = plot and HAS_MATPLOTLIB
         self.duration = duration
+        self.show_raw = show_raw
         self.running = True
         self.driver: Optional[IMUDriver] = None
         self.simulator: Optional[IMUSimulator] = None
         self.start_time = time.time()
         self.sample_count = 0
+        
+        # Movement detection parameters
+        self.movement_threshold = movement_threshold  # m/s² threshold for detecting movement
+        self.gravity_threshold = 8.0   # m/s² - minimum gravity to consider Z-axis as up
+        self.accel_history = []        # Store recent acceleration values for smoothing
+        self.history_size = 5          # Number of samples to average
         
         # Setup signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -744,30 +755,120 @@ class IMUTester:
             print(f"Initialized: {model.value} hardware mode")
             return True
     
+    def detect_movement(self, data: IMUData) -> str:
+        """
+        Detect movement direction from acceleration data.
+        
+        Args:
+            data: IMU data containing acceleration values
+            
+        Returns:
+            Movement direction string: "not moving", "forward", "backward", "leftward", "rightward"
+        """
+        # Add to history for smoothing
+        self.accel_history.append((data.accel_x, data.accel_y, data.accel_z))
+        if len(self.accel_history) > self.history_size:
+            self.accel_history.pop(0)
+        
+        # Calculate average acceleration (smoothing to reduce noise)
+        if len(self.accel_history) < 3:
+            return "calculating..."
+        
+        avg_x = sum(a[0] for a in self.accel_history) / len(self.accel_history)
+        avg_y = sum(a[1] for a in self.accel_history) / len(self.accel_history)
+        avg_z = sum(a[2] for a in self.accel_history) / len(self.accel_history)
+        
+        # Find which axis has the largest magnitude (likely gravity)
+        magnitudes = [abs(avg_x), abs(avg_y), abs(avg_z)]
+        max_mag_idx = magnitudes.index(max(magnitudes))
+        max_mag = max(magnitudes)
+        
+        # If largest magnitude is close to gravity (9.8 m/s²), that axis has gravity
+        # Otherwise, sensor might be in freefall or experiencing high acceleration
+        if max_mag < self.gravity_threshold:
+            # No clear gravity vector - might be in motion or freefall
+            # Use all axes, but with higher threshold
+            linear_x = avg_x
+            linear_y = avg_y
+        elif max_mag_idx == 2:  # Z-axis has gravity (normal orientation)
+            # Z-axis has gravity, X and Y are horizontal movement
+            linear_x = avg_x
+            linear_y = avg_y
+        elif max_mag_idx == 0:  # X-axis has gravity (rotated 90°)
+            # X-axis has gravity, Y and Z are movement axes
+            # For simplicity, treat Y as left/right and ignore Z vertical movement
+            linear_x = 0  # This axis has gravity
+            linear_y = avg_y  # This is horizontal movement
+        else:  # Y-axis has gravity (rotated 90°)
+            # Y-axis has gravity, X and Z are movement axes
+            linear_x = avg_x  # This is horizontal movement
+            linear_y = 0  # This axis has gravity
+        
+        # Determine movement direction based on linear acceleration
+        abs_x = abs(linear_x)
+        abs_y = abs(linear_y)
+        
+        # Check if movement is significant (above threshold)
+        if abs_x < self.movement_threshold and abs_y < self.movement_threshold:
+            return "not moving"
+        
+        # Determine primary direction (whichever has larger magnitude)
+        if abs_x > abs_y:
+            # Movement primarily in X direction (forward/backward)
+            if linear_x > self.movement_threshold:
+                return "forward"
+            elif linear_x < -self.movement_threshold:
+                return "backward"
+        else:
+            # Movement primarily in Y direction (left/right)
+            if linear_y > self.movement_threshold:
+                return "rightward"
+            elif linear_y < -self.movement_threshold:
+                return "leftward"
+        
+        return "not moving"
+    
     def print_data(self, data: IMUData):
-        """Print IMU data to console."""
+        """Print IMU data to console with movement direction or raw values."""
         elapsed = data.timestamp - self.start_time
         actual_rate = self.sample_count / elapsed if elapsed > 0 else 0
         
-        print(f"\r[{elapsed:6.2f}s] Sample: {self.sample_count:5d} | "
-              f"Rate: {actual_rate:5.1f} Hz | "
-              f"Accel: [{data.accel_x:6.2f}, {data.accel_y:6.2f}, {data.accel_z:6.2f}] m/s² | "
-              f"Gyro: [{data.gyro_x:6.2f}, {data.gyro_y:6.2f}, {data.gyro_z:6.2f}] deg/s | "
-              f"Temp: {data.temperature:5.1f}°C", end='', flush=True)
-        
-        # Print magnetometer if available
-        if data.mag_x != 0.0 or data.mag_y != 0.0 or data.mag_z != 0.0:
-            print(f" | Mag: [{data.mag_x:6.1f}, {data.mag_y:6.1f}, {data.mag_z:6.1f}] µT", end='')
-        
-        # Print quaternion if available (and meaningful)
-        if abs(data.quaternion_w - 1.0) > 0.01 or abs(data.quaternion_x) > 0.01:
-            print(f" | Quat: [{data.quaternion_w:5.3f}, {data.quaternion_x:5.3f}, "
-                  f"{data.quaternion_y:5.3f}, {data.quaternion_z:5.3f}]", end='')
-        
-        # Print Euler angles if available
-        if abs(data.euler_roll) > 0.01 or abs(data.euler_pitch) > 0.01:
-            print(f" | Euler: [R:{data.euler_roll:6.1f}, P:{data.euler_pitch:6.1f}, "
-                  f"Y:{data.euler_yaw:6.1f}]°", end='')
+        if self.show_raw:
+            # Show raw acceleration and gyro values
+            print(f"\r[{elapsed:6.2f}s] Sample: {self.sample_count:5d} | "
+                  f"Rate: {actual_rate:5.1f} Hz | "
+                  f"Accel: [{data.accel_x:6.2f}, {data.accel_y:6.2f}, {data.accel_z:6.2f}] m/s² | "
+                  f"Gyro: [{data.gyro_x:6.2f}, {data.gyro_y:6.2f}, {data.gyro_z:6.2f}] deg/s | "
+                  f"Temp: {data.temperature:5.1f}C", end='', flush=True)
+            
+            # Print magnetometer if available
+            if data.mag_x != 0.0 or data.mag_y != 0.0 or data.mag_z != 0.0:
+                print(f" | Mag: [{data.mag_x:6.1f}, {data.mag_y:6.1f}, {data.mag_z:6.1f}] uT", end='')
+        else:
+            # Show movement direction
+            movement = self.detect_movement(data)
+            
+            # Color codes for movement (optional, works on most terminals)
+            movement_colors = {
+                "not moving": "",
+                "forward": "\033[92m",    # Green
+                "backward": "\033[91m",   # Red
+                "leftward": "\033[93m",   # Yellow
+                "rightward": "\033[94m",  # Blue
+                "calculating...": "\033[90m"  # Gray
+            }
+            reset_color = "\033[0m"
+            color = movement_colors.get(movement, "")
+            
+            print(f"\r[{elapsed:6.2f}s] Sample: {self.sample_count:5d} | "
+                  f"Rate: {actual_rate:5.1f} Hz | "
+                  f"Movement: {color}{movement:12s}{reset_color} | "
+                  f"Temp: {data.temperature:5.1f}C", end='', flush=True)
+            
+            # Optionally show gyro for rotation detection
+            gyro_magnitude = (data.gyro_x**2 + data.gyro_y**2 + data.gyro_z**2)**0.5
+            if gyro_magnitude > 5.0:  # Significant rotation
+                print(f" | Rotating: {gyro_magnitude:5.1f} deg/s", end='')
     
     def run(self):
         """Main loop for reading and displaying IMU data."""
@@ -778,6 +879,11 @@ class IMUTester:
         print("\n" + "="*80)
         print("IMU Testing Toolkit - Starting data acquisition")
         print("="*80)
+        if not self.show_raw:
+            print(f"Movement detection: ON (threshold: {self.movement_threshold} m/s²)")
+            print("Displaying: not moving, forward, backward, leftward, rightward")
+        else:
+            print("Displaying: Raw acceleration and gyroscope values")
         print("Press Ctrl+C to stop\n")
         
         dt = 1.0 / self.sample_rate
@@ -853,8 +959,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                          # Auto-detect and run with real sensor
+  %(prog)s                          # Auto-detect and show movement direction
   %(prog)s --simulate               # Run in simulation mode
+  %(prog)s --raw                    # Show raw acceleration/gyro values
+  %(prog)s --threshold 0.3          # Lower movement detection threshold
   %(prog)s --rate 100 --plot        # Run at 100 Hz with live plot
   %(prog)s --simulate --duration 10 # Simulate for 10 seconds
         """
@@ -886,6 +994,19 @@ Examples:
         help='Run duration in seconds (default: infinite until Ctrl+C)'
     )
     
+    parser.add_argument(
+        '--raw',
+        action='store_true',
+        help='Show raw acceleration/gyro values instead of movement direction'
+    )
+    
+    parser.add_argument(
+        '--threshold',
+        type=float,
+        default=0.5,
+        help='Movement detection threshold in m/s² (default: 0.5)'
+    )
+    
     args = parser.parse_args()
     
     # Validate arguments
@@ -902,7 +1023,9 @@ Examples:
         simulate=args.simulate,
         sample_rate=args.rate,
         plot=args.plot,
-        duration=args.duration
+        duration=args.duration,
+        show_raw=args.raw,
+        movement_threshold=args.threshold
     )
     
     tester.run()
