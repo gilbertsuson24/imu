@@ -579,8 +579,8 @@ class IMUTester:
     
     def __init__(self, simulate: bool = False, sample_rate: float = 50.0, 
                  plot: bool = False, duration: Optional[float] = None,
-                 show_raw: bool = False, movement_threshold: float = 0.5,
-                 sensitivity: str = 'medium'):
+                 show_raw: bool = False, movement_threshold: float = 0.3,
+                 sensitivity: str = 'medium', debug: bool = False):
         """
         Initialize IMU tester.
         
@@ -598,6 +598,7 @@ class IMUTester:
         self.plot = plot and HAS_MATPLOTLIB
         self.duration = duration
         self.show_raw = show_raw
+        self.debug = debug
         self.running = True
         self.driver: Optional[IMUDriver] = None
         self.simulator: Optional[IMUSimulator] = None
@@ -606,7 +607,7 @@ class IMUTester:
         
         # Movement detection parameters based on sensitivity
         self.movement_threshold = movement_threshold  # m/s² threshold for detecting movement
-        self.stop_threshold = movement_threshold * 0.3  # Lower threshold to detect stopping (30% of movement threshold)
+        self.stop_threshold = movement_threshold * 0.5  # Lower threshold to detect stopping (50% of movement threshold)
         self.gravity_threshold = 8.0   # m/s² - minimum gravity to consider Z-axis as up
         self.accel_history = []        # Store recent acceleration values for smoothing
         self.base_gravity = None       # Baseline gravity vector for comparison
@@ -854,42 +855,59 @@ class IMUTester:
         # Calculate total linear acceleration magnitude
         total_linear = (linear_x**2 + linear_y**2)**0.5
         
-        # Check if movement is significant (above threshold)
+        # Movement detection: check if acceleration exceeds threshold on any axis
+        # Use a lower effective threshold for detection (more sensitive)
+        detection_threshold = self.movement_threshold * 0.8  # 80% of threshold for detection
+        max_accel = max(abs_x, abs_y)
+        
+        # First check: Is there any significant movement?
         if total_linear < self.stop_threshold:
             # Very low acceleration - definitely stopped
             current_movement = "not moving"
-        elif abs_x >= self.movement_threshold or abs_y >= self.movement_threshold:
-            # Significant movement detected
-            # Determine primary direction (whichever has larger magnitude)
+        elif max_accel >= detection_threshold or total_linear >= detection_threshold:
+            # Movement detected - determine direction
             # Use a ratio to determine dominance (prevents one axis from always winning)
-            if abs_x > abs_y * 1.2:  # X is significantly larger (20% margin)
+            if abs_x > abs_y * 1.15:  # X is significantly larger (15% margin, more sensitive)
                 # Movement primarily in X direction (forward/backward)
-                if linear_x > self.movement_threshold:
+                if linear_x > detection_threshold:
                     current_movement = "forward"
-                elif linear_x < -self.movement_threshold:
+                elif linear_x < -detection_threshold:
                     current_movement = "backward"
-            elif abs_y > abs_x * 1.2:  # Y is significantly larger (20% margin)
-                # Movement primarily in Y direction (left/right)
-                if linear_y > self.movement_threshold:
-                    current_movement = "rightward"
-                elif linear_y < -self.movement_threshold:
-                    current_movement = "leftward"
-            else:
-                # Both axes have similar magnitude - use the larger one
-                if abs_x > abs_y:
-                    if linear_x > 0:
-                        current_movement = "forward"
-                    else:
-                        current_movement = "backward"
                 else:
-                    if linear_y > 0:
-                        current_movement = "rightward"
+                    # Close to threshold, use sign (more permissive)
+                    current_movement = "forward" if linear_x > 0 else "backward"
+            elif abs_y > abs_x * 1.15:  # Y is significantly larger (15% margin, more sensitive)
+                # Movement primarily in Y direction (left/right)
+                if linear_y > detection_threshold:
+                    current_movement = "rightward"
+                elif linear_y < -detection_threshold:
+                    current_movement = "leftward"
+                else:
+                    # Close to threshold, use sign (more permissive)
+                    current_movement = "rightward" if linear_y > 0 else "leftward"
+            else:
+                # Both axes have similar magnitude - use the larger one with even lower threshold
+                threshold_low = detection_threshold * 0.8  # 64% of original threshold for diagonal
+                if abs_x > abs_y:
+                    if abs_x > threshold_low:
+                        current_movement = "forward" if linear_x > 0 else "backward"
+                    elif abs_y > threshold_low:
+                        current_movement = "rightward" if linear_y > 0 else "leftward"
                     else:
-                        current_movement = "leftward"
+                        # Very small movement, use largest
+                        current_movement = "forward" if linear_x > 0 else "backward"
+                else:
+                    if abs_y > threshold_low:
+                        current_movement = "rightward" if linear_y > 0 else "leftward"
+                    elif abs_x > threshold_low:
+                        current_movement = "forward" if linear_x > 0 else "backward"
+                    else:
+                        # Very small movement, use largest
+                        current_movement = "rightward" if linear_y > 0 else "leftward"
         else:
-            # Between stop_threshold and movement_threshold - use hysteresis
+            # Between stop_threshold and detection_threshold - use hysteresis
             # If we were moving, keep showing movement until it drops below stop_threshold
-            if self.last_movement != "not moving":
+            if self.last_movement != "not moving" and total_linear > self.stop_threshold:
                 current_movement = self.last_movement  # Keep last movement
             else:
                 current_movement = "not moving"
@@ -963,6 +981,17 @@ class IMUTester:
                   f"Rate: {actual_rate:5.1f} Hz | "
                   f"Movement: {color}{movement_display:<20s}{reset_color} | "
                   f"Temp: {data.temperature:5.1f}C", end='', flush=True)
+            
+            # Show debug info if enabled
+            if self.debug and self.base_gravity is not None and len(self.accel_history) >= 2:
+                # Calculate linear acceleration for display
+                recent_samples = self.accel_history[-2:] if len(self.accel_history) >= 2 else self.accel_history
+                avg_x = sum(a[0] for a in recent_samples) / len(recent_samples)
+                avg_y = sum(a[1] for a in recent_samples) / len(recent_samples)
+                delta_x = avg_x - self.base_gravity[0]
+                delta_y = avg_y - self.base_gravity[1]
+                total_linear = (delta_x**2 + delta_y**2)**0.5
+                print(f" | Linear: [{delta_x:5.2f}, {delta_y:5.2f}] | Total: {total_linear:5.2f} m/s²", end='')
             
             # Optionally show gyro for rotation detection
             gyro_magnitude = (data.gyro_x**2 + data.gyro_y**2 + data.gyro_z**2)**0.5
@@ -1105,8 +1134,14 @@ Examples:
     parser.add_argument(
         '--threshold',
         type=float,
-        default=0.5,
-        help='Movement detection threshold in m/s² (default: 0.5)'
+        default=0.3,
+        help='Movement detection threshold in m/s² (default: 0.3, lower = more sensitive)'
+    )
+    
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Show debug information (linear acceleration values)'
     )
     
     parser.add_argument(
@@ -1136,7 +1171,8 @@ Examples:
         duration=args.duration,
         show_raw=args.raw,
         movement_threshold=args.threshold,
-        sensitivity=args.sensitivity
+        sensitivity=args.sensitivity,
+        debug=args.debug
     )
     
     tester.run()
