@@ -36,10 +36,28 @@ sudo usermod -a -G i2c $USER
 # Log out and log back in for changes to take effect
 ```
 
-### 3. Install dependencies
+### 3. Create and activate virtual environment (Recommended)
+
+Modern Raspberry Pi OS uses externally-managed Python environments. Use a virtual environment:
 
 ```bash
-# Minimal installation (simulation mode only)
+# Install python3-venv if not already installed
+sudo apt update
+sudo apt install -y python3-venv python3-full
+
+# Create virtual environment
+python3 -m venv venv
+
+# Activate virtual environment
+source venv/bin/activate
+
+# Your prompt should now show (venv)
+```
+
+### 4. Install dependencies
+
+```bash
+# Make sure virtual environment is activated (you should see (venv) in your prompt)
 pip install -r requirements.txt
 
 # For hardware support with specific sensors, uncomment the relevant line in requirements.txt:
@@ -48,29 +66,40 @@ pip install -r requirements.txt
 # adafruit-circuitpython-lsm6ds     # For LSM6DS3/LSM6DS33
 ```
 
+**Note:** Always activate the virtual environment before running the script:
+```bash
+source venv/bin/activate
+python3 imu_test.py
+```
+
 ## Quick Start
 
 ### Auto-detect and run with real sensor
 
 ```bash
+# Make sure virtual environment is activated
+source venv/bin/activate
 python3 imu_test.py
 ```
 
 ### Run in simulation mode (no hardware required)
 
 ```bash
+source venv/bin/activate
 python3 imu_test.py --simulate
 ```
 
 ### Run with live plotting at 100 Hz for 10 seconds
 
 ```bash
+source venv/bin/activate
 python3 imu_test.py --rate 100 --plot --duration 10
 ```
 
 ### Run in simulation mode with plot
 
 ```bash
+source venv/bin/activate
 python3 imu_test.py --simulate --plot --rate 50
 ```
 
