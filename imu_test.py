@@ -609,6 +609,7 @@ class IMUTester:
         self.gravity_threshold = 8.0   # m/s² - minimum gravity to consider Z-axis as up
         self.accel_history = []        # Store recent acceleration values for smoothing
         self.base_gravity = None       # Baseline gravity vector for comparison
+        self.calibration_samples = []  # Separate buffer for calibration (not limited)
         
         # Adjust parameters based on sensitivity
         if sensitivity == 'high':
@@ -782,21 +783,32 @@ class IMUTester:
         Returns:
             Movement direction string: "not moving", "forward", "backward", "leftward", "rightward"
         """
-        # Add to history for minimal smoothing (only 2-3 samples)
-        self.accel_history.append((data.accel_x, data.accel_y, data.accel_z))
+        current_sample = (data.accel_x, data.accel_y, data.accel_z)
+        
+        # Establish baseline gravity vector on startup (separate from history)
+        if self.base_gravity is None:
+            # Collect calibration samples (unlimited size)
+            self.calibration_samples.append(current_sample)
+            
+            if len(self.calibration_samples) < self.base_samples:
+                # Still calibrating - show progress
+                return f"calibrating... ({len(self.calibration_samples)}/{self.base_samples})"
+            
+            # Calculate baseline gravity vector (average of calibration samples)
+            base_x = sum(a[0] for a in self.calibration_samples) / len(self.calibration_samples)
+            base_y = sum(a[1] for a in self.calibration_samples) / len(self.calibration_samples)
+            base_z = sum(a[2] for a in self.calibration_samples) / len(self.calibration_samples)
+            self.base_gravity = (base_x, base_y, base_z)
+            # Clear calibration samples to free memory
+            self.calibration_samples = []
+            # Initialize history with current sample
+            self.accel_history.append(current_sample)
+            return "calibrating..."  # One more sample to initialize history
+        
+        # Add to history for minimal smoothing (only 2-4 samples)
+        self.accel_history.append(current_sample)
         if len(self.accel_history) > self.history_size:
             self.accel_history.pop(0)
-        
-        # Establish baseline gravity vector on startup
-        if self.base_gravity is None:
-            if len(self.accel_history) < self.base_samples:
-                return "calibrating..."
-            # Calculate baseline gravity vector (average of first samples)
-            base_x = sum(a[0] for a in self.accel_history) / len(self.accel_history)
-            base_y = sum(a[1] for a in self.accel_history) / len(self.accel_history)
-            base_z = sum(a[2] for a in self.accel_history) / len(self.accel_history)
-            self.base_gravity = (base_x, base_y, base_z)
-            return "calibrating..."
         
         # Use recent samples for faster response (minimal smoothing)
         if len(self.accel_history) < 2:
@@ -874,20 +886,31 @@ class IMUTester:
             movement = self.detect_movement(data)
             
             # Color codes for movement (optional, works on most terminals)
-            movement_colors = {
-                "not moving": "",
-                "forward": "\033[92m",    # Green
-                "backward": "\033[91m",   # Red
-                "leftward": "\033[93m",   # Yellow
-                "rightward": "\033[94m",  # Blue
-                "calculating...": "\033[90m"  # Gray
-            }
             reset_color = "\033[0m"
-            color = movement_colors.get(movement, "")
+            color = ""
+            if movement.startswith("calibrating"):
+                color = "\033[90m"  # Gray for calibration
+            elif movement == "not moving":
+                color = ""
+            elif movement == "forward":
+                color = "\033[92m"  # Green
+            elif movement == "backward":
+                color = "\033[91m"  # Red
+            elif movement == "leftward":
+                color = "\033[93m"  # Yellow
+            elif movement == "rightward":
+                color = "\033[94m"  # Blue
+            elif movement == "calculating...":
+                color = "\033[90m"  # Gray
+            
+            # Format movement string (handle variable length for calibration progress)
+            movement_display = movement
+            if len(movement) > 20:  # Truncate if too long
+                movement_display = movement[:17] + "..."
             
             print(f"\r[{elapsed:6.2f}s] Sample: {self.sample_count:5d} | "
                   f"Rate: {actual_rate:5.1f} Hz | "
-                  f"Movement: {color}{movement:12s}{reset_color} | "
+                  f"Movement: {color}{movement_display:<20s}{reset_color} | "
                   f"Temp: {data.temperature:5.1f}C", end='', flush=True)
             
             # Optionally show gyro for rotation detection
