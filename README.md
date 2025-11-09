@@ -22,6 +22,24 @@ A comprehensive Python toolkit for testing IMU (Inertial Measurement Unit) senso
 
 ## Installation
 
+### Quick Setup (Automated)
+
+For easiest setup, use the automated setup script:
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+This script will:
+- Install system dependencies (python3-venv, python3-full, i2c-tools)
+- Create a virtual environment
+- Install Python packages
+- Check I2C configuration
+- Add user to i2c group
+
+### Manual Setup
+
 ### 1. Enable I2C on Raspberry Pi
 
 ```bash
