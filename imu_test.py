@@ -579,7 +579,8 @@ class IMUTester:
     
     def __init__(self, simulate: bool = False, sample_rate: float = 50.0, 
                  plot: bool = False, duration: Optional[float] = None,
-                 show_raw: bool = False, movement_threshold: float = 0.5):
+                 show_raw: bool = False, movement_threshold: float = 0.5,
+                 sensitivity: str = 'medium'):
         """
         Initialize IMU tester.
         
@@ -590,6 +591,7 @@ class IMUTester:
             duration: Run duration in seconds (None for infinite)
             show_raw: Show raw acceleration values instead of movement direction
             movement_threshold: Threshold for movement detection in m/s²
+            sensitivity: Detection sensitivity: 'low', 'medium', or 'high'
         """
         self.simulate = simulate
         self.sample_rate = sample_rate
@@ -602,11 +604,25 @@ class IMUTester:
         self.start_time = time.time()
         self.sample_count = 0
         
-        # Movement detection parameters
+        # Movement detection parameters based on sensitivity
         self.movement_threshold = movement_threshold  # m/s² threshold for detecting movement
         self.gravity_threshold = 8.0   # m/s² - minimum gravity to consider Z-axis as up
         self.accel_history = []        # Store recent acceleration values for smoothing
-        self.history_size = 5          # Number of samples to average
+        self.base_gravity = None       # Baseline gravity vector for comparison
+        
+        # Adjust parameters based on sensitivity
+        if sensitivity == 'high':
+            # Fast response, minimal smoothing
+            self.history_size = 2
+            self.base_samples = 5
+        elif sensitivity == 'low':
+            # Slower but more stable
+            self.history_size = 4
+            self.base_samples = 15
+        else:  # medium
+            # Balanced
+            self.history_size = 3
+            self.base_samples = 10
         
         # Setup signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -758,6 +774,7 @@ class IMUTester:
     def detect_movement(self, data: IMUData) -> str:
         """
         Detect movement direction from acceleration data.
+        Uses faster response algorithm with minimal smoothing.
         
         Args:
             data: IMU data containing acceleration values
@@ -765,43 +782,51 @@ class IMUTester:
         Returns:
             Movement direction string: "not moving", "forward", "backward", "leftward", "rightward"
         """
-        # Add to history for smoothing
+        # Add to history for minimal smoothing (only 2-3 samples)
         self.accel_history.append((data.accel_x, data.accel_y, data.accel_z))
         if len(self.accel_history) > self.history_size:
             self.accel_history.pop(0)
         
-        # Calculate average acceleration (smoothing to reduce noise)
-        if len(self.accel_history) < 3:
+        # Establish baseline gravity vector on startup
+        if self.base_gravity is None:
+            if len(self.accel_history) < self.base_samples:
+                return "calibrating..."
+            # Calculate baseline gravity vector (average of first samples)
+            base_x = sum(a[0] for a in self.accel_history) / len(self.accel_history)
+            base_y = sum(a[1] for a in self.accel_history) / len(self.accel_history)
+            base_z = sum(a[2] for a in self.accel_history) / len(self.accel_history)
+            self.base_gravity = (base_x, base_y, base_z)
+            return "calibrating..."
+        
+        # Use recent samples for faster response (minimal smoothing)
+        if len(self.accel_history) < 2:
             return "calculating..."
         
-        avg_x = sum(a[0] for a in self.accel_history) / len(self.accel_history)
-        avg_y = sum(a[1] for a in self.accel_history) / len(self.accel_history)
-        avg_z = sum(a[2] for a in self.accel_history) / len(self.accel_history)
+        # Quick average of last 2-3 samples (faster than full history)
+        recent_samples = self.accel_history[-2:] if len(self.accel_history) >= 2 else self.accel_history
+        avg_x = sum(a[0] for a in recent_samples) / len(recent_samples)
+        avg_y = sum(a[1] for a in recent_samples) / len(recent_samples)
+        avg_z = sum(a[2] for a in recent_samples) / len(recent_samples)
         
-        # Find which axis has the largest magnitude (likely gravity)
-        magnitudes = [abs(avg_x), abs(avg_y), abs(avg_z)]
-        max_mag_idx = magnitudes.index(max(magnitudes))
-        max_mag = max(magnitudes)
+        # Calculate change from baseline (removes gravity and static offset)
+        delta_x = avg_x - self.base_gravity[0]
+        delta_y = avg_y - self.base_gravity[1]
+        delta_z = avg_z - self.base_gravity[2]
         
-        # If largest magnitude is close to gravity (9.8 m/s²), that axis has gravity
-        # Otherwise, sensor might be in freefall or experiencing high acceleration
-        if max_mag < self.gravity_threshold:
-            # No clear gravity vector - might be in motion or freefall
-            # Use all axes, but with higher threshold
-            linear_x = avg_x
-            linear_y = avg_y
-        elif max_mag_idx == 2:  # Z-axis has gravity (normal orientation)
-            # Z-axis has gravity, X and Y are horizontal movement
-            linear_x = avg_x
-            linear_y = avg_y
-        elif max_mag_idx == 0:  # X-axis has gravity (rotated 90°)
-            # X-axis has gravity, Y and Z are movement axes
-            # For simplicity, treat Y as left/right and ignore Z vertical movement
+        # Determine which axis has gravity in baseline (sensor orientation)
+        base_magnitudes = [abs(self.base_gravity[0]), abs(self.base_gravity[1]), abs(self.base_gravity[2])]
+        gravity_axis = base_magnitudes.index(max(base_magnitudes))
+        
+        # Extract linear acceleration (movement) by removing gravity component
+        if gravity_axis == 2:  # Z-axis has gravity (normal orientation)
+            # X and Y are horizontal movement axes
+            linear_x = delta_x
+            linear_y = delta_y
+        elif gravity_axis == 0:  # X-axis has gravity (rotated)
             linear_x = 0  # This axis has gravity
-            linear_y = avg_y  # This is horizontal movement
-        else:  # Y-axis has gravity (rotated 90°)
-            # Y-axis has gravity, X and Z are movement axes
-            linear_x = avg_x  # This is horizontal movement
+            linear_y = delta_y  # Horizontal movement
+        else:  # Y-axis has gravity (rotated)
+            linear_x = delta_x  # Horizontal movement
             linear_y = 0  # This axis has gravity
         
         # Determine movement direction based on linear acceleration
@@ -880,7 +905,8 @@ class IMUTester:
         print("IMU Testing Toolkit - Starting data acquisition")
         print("="*80)
         if not self.show_raw:
-            print(f"Movement detection: ON (threshold: {self.movement_threshold} m/s²)")
+            sensitivity_info = f" (sensitivity: {self.history_size}-sample, {self.base_samples}-sample baseline)"
+            print(f"Movement detection: ON (threshold: {self.movement_threshold} m/s²{sensitivity_info})")
             print("Displaying: not moving, forward, backward, leftward, rightward")
         else:
             print("Displaying: Raw acceleration and gyroscope values")
@@ -963,6 +989,8 @@ Examples:
   %(prog)s --simulate               # Run in simulation mode
   %(prog)s --raw                    # Show raw acceleration/gyro values
   %(prog)s --threshold 0.3          # Lower movement detection threshold
+  %(prog)s --sensitivity high       # Fast response (may be noisy)
+  %(prog)s --sensitivity low        # Slower but more stable
   %(prog)s --rate 100 --plot        # Run at 100 Hz with live plot
   %(prog)s --simulate --duration 10 # Simulate for 10 seconds
         """
@@ -1007,6 +1035,14 @@ Examples:
         help='Movement detection threshold in m/s² (default: 0.5)'
     )
     
+    parser.add_argument(
+        '--sensitivity',
+        type=str,
+        choices=['low', 'medium', 'high'],
+        default='medium',
+        help='Movement detection sensitivity: low (slower but stable), medium (balanced), high (fast but may be noisy) (default: medium)'
+    )
+    
     args = parser.parse_args()
     
     # Validate arguments
@@ -1025,7 +1061,8 @@ Examples:
         plot=args.plot,
         duration=args.duration,
         show_raw=args.raw,
-        movement_threshold=args.threshold
+        movement_threshold=args.threshold,
+        sensitivity=args.sensitivity
     )
     
     tester.run()
