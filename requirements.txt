@@ -1,0 +1,30 @@
+# IMU Testing Toolkit - Dependencies
+# Minimal dependencies for real and simulated IMU operation on Raspberry Pi
+
+# Core I2C communication (choose one):
+smbus2>=0.4.3          # Pure Python I2C/SMBus library (recommended, no system dependencies)
+# adafruit-blinka>=8.0.0  # Adafruit's CircuitPython compatibility layer (alternative)
+
+# Optional: Adafruit CircuitPython drivers (install only for specific sensors)
+# Uncomment the ones you need:
+# adafruit-circuitpython-mpu6050>=2.0.0      # MPU6050 support
+# adafruit-circuitpython-bno055>=5.0.0       # BNO055 support (sensor fusion)
+# adafruit-circuitpython-lsm6ds>=1.0.0       # LSM6DS3/LSM6DS33 support
+# adafruit-circuitpython-mpu9250>=1.0.0      # MPU9250 support (if available)
+
+# Data processing and visualization (optional but recommended):
+numpy>=1.21.0          # Numerical operations (required for simulation mode)
+matplotlib>=3.5.0      # Plotting (optional, for --plot flag)
+
+# GPIO interrupts (optional, for interrupt-driven reading):
+# python-periphery>=2.4.0  # GPIO interrupt support (uncomment if needed)
+
+# Note: For minimal installation (simulation only), you only need:
+#   smbus2, numpy
+# 
+# For hardware support with Adafruit drivers:
+#   smbus2 (or adafruit-blinka), adafruit-circuitpython-* (for your sensor), numpy
+#
+# For plotting:
+#   matplotlib (in addition to above)
+
