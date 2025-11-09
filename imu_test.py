@@ -606,10 +606,13 @@ class IMUTester:
         
         # Movement detection parameters based on sensitivity
         self.movement_threshold = movement_threshold  # m/s² threshold for detecting movement
+        self.stop_threshold = movement_threshold * 0.3  # Lower threshold to detect stopping (30% of movement threshold)
         self.gravity_threshold = 8.0   # m/s² - minimum gravity to consider Z-axis as up
         self.accel_history = []        # Store recent acceleration values for smoothing
         self.base_gravity = None       # Baseline gravity vector for comparison
         self.calibration_samples = []  # Separate buffer for calibration (not limited)
+        self.last_movement = "not moving"  # Track last detected movement for hysteresis
+        self.movement_samples = 0      # Count consecutive samples with same movement
         
         # Adjust parameters based on sensitivity
         if sensitivity == 'high':
@@ -845,25 +848,73 @@ class IMUTester:
         abs_x = abs(linear_x)
         abs_y = abs(linear_y)
         
+        # Detect current movement state
+        current_movement = None
+        
+        # Calculate total linear acceleration magnitude
+        total_linear = (linear_x**2 + linear_y**2)**0.5
+        
         # Check if movement is significant (above threshold)
-        if abs_x < self.movement_threshold and abs_y < self.movement_threshold:
-            return "not moving"
-        
-        # Determine primary direction (whichever has larger magnitude)
-        if abs_x > abs_y:
-            # Movement primarily in X direction (forward/backward)
-            if linear_x > self.movement_threshold:
-                return "forward"
-            elif linear_x < -self.movement_threshold:
-                return "backward"
+        if total_linear < self.stop_threshold:
+            # Very low acceleration - definitely stopped
+            current_movement = "not moving"
+        elif abs_x >= self.movement_threshold or abs_y >= self.movement_threshold:
+            # Significant movement detected
+            # Determine primary direction (whichever has larger magnitude)
+            # Use a ratio to determine dominance (prevents one axis from always winning)
+            if abs_x > abs_y * 1.2:  # X is significantly larger (20% margin)
+                # Movement primarily in X direction (forward/backward)
+                if linear_x > self.movement_threshold:
+                    current_movement = "forward"
+                elif linear_x < -self.movement_threshold:
+                    current_movement = "backward"
+            elif abs_y > abs_x * 1.2:  # Y is significantly larger (20% margin)
+                # Movement primarily in Y direction (left/right)
+                if linear_y > self.movement_threshold:
+                    current_movement = "rightward"
+                elif linear_y < -self.movement_threshold:
+                    current_movement = "leftward"
+            else:
+                # Both axes have similar magnitude - use the larger one
+                if abs_x > abs_y:
+                    if linear_x > 0:
+                        current_movement = "forward"
+                    else:
+                        current_movement = "backward"
+                else:
+                    if linear_y > 0:
+                        current_movement = "rightward"
+                    else:
+                        current_movement = "leftward"
         else:
-            # Movement primarily in Y direction (left/right)
-            if linear_y > self.movement_threshold:
-                return "rightward"
-            elif linear_y < -self.movement_threshold:
-                return "leftward"
+            # Between stop_threshold and movement_threshold - use hysteresis
+            # If we were moving, keep showing movement until it drops below stop_threshold
+            if self.last_movement != "not moving":
+                current_movement = self.last_movement  # Keep last movement
+            else:
+                current_movement = "not moving"
         
-        return "not moving"
+        # Apply hysteresis: require multiple samples to change state (prevents oscillation)
+        # Faster transition to "not moving" for better stop detection
+        if current_movement == self.last_movement:
+            self.movement_samples += 1
+        else:
+            self.movement_samples = 1
+        
+        # Different thresholds for different transitions:
+        # - Stopping (any -> "not moving"): 1 sample (fast)
+        # - Starting movement ("not moving" -> any): 2 samples (prevents noise)
+        # - Changing direction (one movement -> another): 2 samples (smooth)
+        required_samples = 2
+        if current_movement == "not moving":
+            required_samples = 1  # Fast stop detection
+        
+        if self.movement_samples >= required_samples:
+            self.last_movement = current_movement
+            return current_movement
+        else:
+            # Still transitioning, return last confirmed state
+            return self.last_movement
     
     def print_data(self, data: IMUData):
         """Print IMU data to console with movement direction or raw values."""
